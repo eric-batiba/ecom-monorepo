@@ -1,0 +1,321 @@
+services:
+  postgres:
+    image: postgres:latest
+    container_name: postgres
+    environment:
+      POSTGRES_DB: mydatabase
+      POSTGRES_USER: myuser
+      POSTGRES_PASSWORD: mypassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - app-network
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U myuser" ]
+      interval: 10s
+      retries: 4
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: adminpass
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    networks:
+      - app-network
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  mongodb:
+    image: mongo:latest
+    container_name: mongodb
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: btb
+      MONGO_INITDB_ROOT_PASSWORD: btb
+      MONGO_INITDB_DATABASE: customerDb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - app-network
+    restart: unless-stopped
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      retries: 4
+
+  mongo-express:
+    image: mongo-express:latest
+    container_name: mongo-express
+    ports:
+      - "27018:8081"
+    environment:
+      ME_CONFIG_MONGODB_SERVER: mongodb
+      ME_CONFIG_MONGODB_PORT: 27017
+      ME_CONFIG_MONGODB_ADMINUSERNAME: btb
+      ME_CONFIG_MONGODB_ADMINPASSWORD: btb
+      ME_CONFIG_BASICAUTH_USERNAME: admin
+      ME_CONFIG_BASICAUTH_PASSWORD: admin
+
+    networks:
+      - app-network
+    restart: unless-stopped
+    depends_on:
+      mongodb:
+        condition: service_healthy
+
+  discovery-server:
+    build: ./services/discovery-server
+    container_name: discovery-server
+    ports:
+      - "8761:8761"
+    expose:
+      - "8761"
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8761/actuator/health" ]
+      interval: 30s
+      retries: 3
+    networks:
+      - app-network
+
+  config-server:
+    build: ./services/config-server
+    container_name: config-server
+    ports:
+      - "8888:8888"
+    expose:
+      - "8888"
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8888/actuator/health"]
+      interval: 30s
+      retries: 4
+    depends_on:
+      discovery-server:
+        condition: service_healthy
+    networks:
+      - app-network
+
+  customer-service:
+    build: ./services/customer-service
+    container_name: customer-service
+    ports:
+      - "8081:8081"
+      - "5005:5005"
+    expose:
+      - "8081"
+      - "5005"
+    environment:
+      JAVA_TOOL_OPTIONS: "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005"
+      DISCOVERY_SERVICE_URL: http://discovery-server:8761/eureka
+      CONFIG_SERVER_URL: http://config-server:8888
+      DB_HOST: mongodb
+      DB_DATABASE: customerDb
+      DB_USERNAME: btb
+      DB_PASSWORD: btb
+      DB_PORT: 27017
+
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8081/actuator/health" ]
+      interval: 30s
+      retries: 5
+    depends_on:
+      config-server:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+    networks:
+      - app-network
+
+  product-service:
+    build: ./services/product-service
+    container_name: product-service
+    ports:
+      - "8082:8082"
+      - "5006:5006"
+    expose:
+      - "8082"
+      - "5006"
+    environment:
+      JAVA_TOOL_OPTIONS: "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5006"
+      DISCOVERY_SERVICE_URL: http://discovery-server:8761/eureka
+      CONFIG_SERVER_URL: http://config-server:8888
+      POSTGRES_URL: jdbc:postgresql://postgres:5432/ecommerce
+      DB_USERNAME: myuser
+      DB_PASSWORD: mypassword
+      SPRING_FLYWAY_ENABLED: 'true'  # Activer Flyway
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8082/actuator/health" ]
+      interval: 30s
+      retries: 5
+    depends_on:
+      config-server:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - app-network
+
+  order-service:
+    build: ./services/order-service
+    container_name: order-service
+    ports:
+      - "8083:8083"
+      - "5007:5007"
+    expose:
+      - "8083"
+      - "5007"
+    environment:
+      JAVA_TOOL_OPTIONS: "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5007"
+      DISCOVERY_SERVICE_URL: http://discovery-server:8761/eureka
+      CONFIG_SERVER_URL: http://config-server:8888
+      POSTGRES_URL: jdbc:postgresql://postgres:5432/ecommerceorder
+      DB_USERNAME: myuser
+      DB_PASSWORD: mypassword
+      SPRING_FLYWAY_ENABLED: 'true'  # Activer Flyway
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8083/actuator/health" ]
+      interval: 30s
+      retries: 6
+    depends_on:
+      config-server:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      customer-service:
+        condition: service_healthy
+      product-service:
+        condition: service_healthy
+      payment-service:
+        condition: service_healthy
+    networks:
+      - app-network
+
+  payment-service:
+    build: ./services/payment-service
+    container_name: payment-service
+    ports:
+      - "8084:8084"
+      - "5008:5008"
+    expose:
+      - "8084"
+      - "5008"
+    environment:
+      JAVA_TOOL_OPTIONS: "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5008"
+      DISCOVERY_SERVICE_URL: http://discovery-server:8761/eureka
+      CONFIG_SERVER_URL: http://config-server:8888
+      POSTGRES_URL: jdbc:postgresql://postgres:5432/ecommercepayment
+      DB_USERNAME: myuser
+      DB_PASSWORD: mypassword
+      SPRING_FLYWAY_ENABLED: 'true'  # Activer Flyway
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8084/actuator/health" ]
+      interval: 30s
+      retries: 5
+    depends_on:
+      config-server:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - app-network
+
+  gateway-service:
+    build: ./services/gateway-service
+    container_name: gateway-service
+    ports:
+      - "9999:9999"
+    expose:
+      - "9999"
+    environment:
+      DISCOVERY_SERVICE_URL: http://discovery-server:8761/eureka
+      CONFIG_SERVER_URL: http://config-server:8888
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:9999/actuator/health" ]
+      interval: 30s
+      retries: 6
+    networks:
+      - app-network
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_SERVER_ID: 1
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - app-network
+
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+    networks:
+      - app-network
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.2
+    container_name: kafka-ui
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_CLUSTERS_0_NAME: "local-cluster"
+      KAFKA_CLUSTERS_0_BOOTSTRAP_SERVERS: "kafka:9092"
+      KAFKA_CLUSTERS_0_ZOOKEEPER: "zookeeper:2181"
+    ports:
+      - "7777:8080"  # Kafka UI port
+    networks:
+      - app-network
+
+  zipkin:
+    image: openzipkin/zipkin:3
+    container_name: zipkin
+    ports:
+      - "9411:9411"  # Expose Zipkin UI and collector port
+    environment:
+      BASE_URL: http://zipkin:9411
+    networks:
+      - app-network
+
+   maildev:
+    image: maildev/maildev:2.1.0
+    container_name: maildev
+    restart: always
+    ports:
+      - "1080:80"
+      - "1025:1025"
+    networks:
+      - app-network
+
+volumes:
+  postgres_data:
+  mongodb_data:
+  pgadmin_data:
+
+networks:
+  app-network:
+    driver: bridge
